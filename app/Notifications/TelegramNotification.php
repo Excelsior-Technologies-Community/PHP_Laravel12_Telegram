@@ -15,6 +15,7 @@ class TelegramNotification extends Notification
     public function toTelegram($notifiable)
     {
         return TelegramMessage::create()
-            ->content("*Laravel 12 Notification*\n\nThis is *bold text*\nThis is _italic text_\n\n[Visit Laravel](https://laravel.com)");
+            ->content("Hello User Name!\nThis message sent from Laravel 12 Telegram Notification Package.");
     }
 }
+
