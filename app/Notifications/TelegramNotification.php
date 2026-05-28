@@ -7,15 +7,14 @@ use NotificationChannels\Telegram\TelegramMessage;
 
 class TelegramNotification extends Notification
 {
-    public function via($notifiable)
+    public function via($notifiable): array
     {
         return ['telegram'];
     }
 
-    public function toTelegram($notifiable)
+    public function toTelegram($notifiable): TelegramMessage
     {
         return TelegramMessage::create()
-            ->content("Hello User Name!\nThis message sent from Laravel 12 Telegram Notification Package.");
+            ->content("Hello!\nThis message sent from Laravel Telegram Notification.");
     }
 }
-

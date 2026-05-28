@@ -3,256 +3,353 @@
 namespace App\Http\Controllers;
 
 use App\Models\User;
+use App\Models\TelegramSubscription;
+use App\Models\TelegramMessageLog;
 use App\Jobs\SendTelegramNotificationJob;
 use App\Notifications\AdvancedTelegramNotification;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Cache;
+use Illuminate\Http\JsonResponse;
+use GuzzleHttp\Client;
 
 class TelegramAdvancedController extends Controller
 {
-    // Show send form
+    protected Client $http;
+
+    public function __construct()
+    {
+        $this->http = new Client(['timeout' => 15]);
+    }
+
     public function showForm()
     {
         return view('telegram.send-form');
     }
 
-    // Send advanced notification
-    public function sendAdvanced(Request $request)
+    public function dashboard()
+    {
+        return view('telegram.dashboard');
+    }
+
+    public function sendAdvanced(Request $request): JsonResponse
     {
         try {
             $request->validate([
                 'chat_ids' => 'required',
-                'content' => 'required',
-                'title' => 'nullable',
-                'message_type' => 'nullable',
-                'button_text' => 'nullable',
-                'button_url' => 'nullable',
-                'schedule_time' => 'nullable|date'
+                'content' => 'required|string',
+                'title' => 'nullable|string|max:100',
+                'message_type' => 'nullable|string|in:info,success,warning,error,news,promo',
+                'button_text' => 'nullable|string|max:64',
+                'button_url' => 'nullable|url',
+                'schedule_time' => 'nullable|date|after:now',
             ]);
 
-            $chatIds = explode(',', $request->chat_ids);
-            $chatIds = array_map('trim', $chatIds);
-            
+            $chatIds = array_filter(array_map('trim', explode(',', $request->chat_ids)));
             $scheduleTime = $request->schedule_time;
-            
+            $isScheduled = (bool) $scheduleTime;
+
             foreach ($chatIds as $chatId) {
-                if ($scheduleTime) {
-                    // Schedule for later
+                if ($isScheduled) {
                     SendTelegramNotificationJob::dispatch(
                         $chatId,
                         $request->content,
                         $request->title,
-                        $request->message_type,
+                        $request->message_type ?? 'info',
                         $request->button_text,
                         $request->button_url
                     )->delay(now()->parse($scheduleTime));
+
+                    TelegramMessageLog::create([
+                        'chat_id' => $chatId,
+                        'direction' => 'outgoing',
+                        'message_type' => $request->message_type ?? 'info',
+                        'content' => $request->content,
+                        'title' => $request->title,
+                        'status' => 'scheduled',
+                        'is_scheduled' => true,
+                        'scheduled_at' => $scheduleTime,
+                    ]);
                 } else {
-                    // Send immediately
                     $user = new User();
                     $user->setTelegramChatId($chatId);
-                    
+
                     $user->notify(new AdvancedTelegramNotification(
                         $request->content,
                         $request->title,
-                        $request->message_type,
+                        $request->message_type ?? 'info',
                         $request->button_text,
                         $request->button_url
                     ));
                 }
             }
-            
-            $message = $scheduleTime 
-                ? "Notifications scheduled successfully for " . count($chatIds) . " recipient(s)!"
-                : "Notifications sent successfully to " . count($chatIds) . " recipient(s)!";
-            
+
+            $count = count($chatIds);
+            $message = $isScheduled
+                ? "Scheduled for {$count} recipient(s) at {$scheduleTime}"
+                : "Sent successfully to {$count} recipient(s)";
+
             return response()->json(['success' => true, 'message' => $message]);
-            
+
         } catch (\Exception $e) {
             return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
         }
     }
 
-    // Send bulk notification to multiple users
-    public function sendBulk(Request $request)
+    public function sendBulk(Request $request): JsonResponse
     {
         try {
             $request->validate([
                 'chat_ids' => 'required|array',
-                'message' => 'required'
+                'chat_ids.*' => 'required|string',
+                'message' => 'required|string',
+                'title' => 'nullable|string',
+                'message_type' => 'nullable|string|in:info,success,warning,error,news,promo',
             ]);
-            
+
             $successCount = 0;
             $failedCount = 0;
-            
+            $errors = [];
+
             foreach ($request->chat_ids as $chatId) {
                 try {
                     $user = new User();
                     $user->setTelegramChatId($chatId);
-                    
+
                     $user->notify(new AdvancedTelegramNotification(
                         $request->message,
                         $request->title ?? 'Bulk Notification',
                         $request->message_type ?? 'info'
                     ));
+
                     $successCount++;
                 } catch (\Exception $e) {
                     $failedCount++;
+                    $errors[] = "Chat {$chatId}: " . $e->getMessage();
                 }
             }
-            
+
             return response()->json([
                 'success' => true,
-                'message' => "Sent to $successCount users, Failed: $failedCount"
+                'message' => "Sent: {$successCount}, Failed: {$failedCount}",
+                'errors' => $errors,
             ]);
-            
+
         } catch (\Exception $e) {
             return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
         }
     }
 
-    // Send image with caption
-    public function sendWithImage(Request $request)
+    public function sendToSubscribers(Request $request): JsonResponse
     {
         try {
             $request->validate([
-                'chat_id' => 'required',
-                'image' => 'required|image|max:5120', // Max 5MB
-                'caption' => 'nullable'
+                'message' => 'required|string',
+                'title' => 'nullable|string',
+                'message_type' => 'nullable|string|in:info,success,warning,error,news,promo',
+                'target' => 'nullable|string|in:all,private,groups,channels',
             ]);
-            
-            $chatId = $request->chat_id;
-            $image = $request->file('image');
-            $caption = $request->caption ?? 'Image from Laravel';
-            
-            // You need to implement image sending logic here
-            // Using Telegram Bot API directly
-            $botToken = config('services.telegram-bot-api.token');
-            $url = "https://api.telegram.org/bot{$botToken}/sendPhoto";
-            
-            $client = new \GuzzleHttp\Client();
-            $response = $client->post($url, [
-                'multipart' => [
-                    [
-                        'name' => 'chat_id',
-                        'contents' => $chatId
-                    ],
-                    [
-                        'name' => 'photo',
-                        'contents' => fopen($image->getPathname(), 'r'),
-                        'filename' => $image->getClientOriginalName()
-                    ],
-                    [
-                        'name' => 'caption',
-                        'contents' => $caption
-                    ]
-                ]
-            ]);
-            
-            $result = json_decode($response->getBody(), true);
-            
-            if ($result['ok']) {
-                return response()->json(['success' => true, 'message' => 'Image sent successfully!']);
-            } else {
-                throw new \Exception('Failed to send image');
+
+            $query = TelegramSubscription::active();
+
+            match ($request->target ?? 'all') {
+                'private' => $query->private(),
+                'groups' => $query->groups(),
+                'channels' => $query->channels(),
+                default => null,
+            };
+
+            $subscriptions = $query->get();
+            $successCount = 0;
+            $failedCount = 0;
+
+            foreach ($subscriptions as $subscription) {
+                SendTelegramNotificationJob::dispatch(
+                    $subscription->chat_id,
+                    $request->message,
+                    $request->title,
+                    $request->message_type ?? 'info'
+                );
+                $successCount++;
             }
-            
+
+            return response()->json([
+                'success' => true,
+                'message' => "Queued for {$successCount} subscribers",
+                'total_subscribers' => $subscriptions->count(),
+            ]);
+
         } catch (\Exception $e) {
             return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
         }
     }
 
-    // Get bot information
-    public function getBotInfo()
+    public function sendWithImage(Request $request): JsonResponse
+    {
+        try {
+            $request->validate([
+                'chat_id' => 'required|string',
+                'image' => 'required|image|max:5120',
+                'caption' => 'nullable|string|max:1024',
+            ]);
+
+            $botToken = config('services.telegram-bot-api.token');
+            $url = "https://api.telegram.org/bot{$botToken}/sendPhoto";
+            $image = $request->file('image');
+
+            $response = $this->http->post($url, [
+                'multipart' => [
+                    ['name' => 'chat_id', 'contents' => $request->chat_id],
+                    ['name' => 'photo', 'contents' => fopen($image->getPathname(), 'r'), 'filename' => $image->getClientOriginalName()],
+                    ['name' => 'caption', 'contents' => $request->caption ?? ''],
+                    ['name' => 'parse_mode', 'contents' => 'Markdown'],
+                ],
+            ]);
+
+            $result = json_decode($response->getBody(), true);
+
+            if ($result['ok']) {
+                TelegramMessageLog::logOutgoing($request->chat_id, $request->caption ?? '[Image]', 'Image');
+                return response()->json(['success' => true, 'message' => 'Image sent successfully!']);
+            }
+
+            throw new \Exception('Telegram API returned error');
+
+        } catch (\Exception $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    public function sendWithInlineKeyboard(Request $request): JsonResponse
+    {
+        try {
+            $request->validate([
+                'chat_id' => 'required|string',
+                'message' => 'required|string',
+                'buttons' => 'nullable|array',
+            ]);
+
+            $botToken = config('services.telegram-bot-api.token');
+            $url = "https://api.telegram.org/bot{$botToken}/sendMessage";
+
+            $keyboard = $request->buttons ?? [
+                'inline_keyboard' => [
+                    [
+                        ['text' => '👍 Yes', 'callback_data' => 'yes'],
+                        ['text' => '👎 No', 'callback_data' => 'no'],
+                    ],
+                    [
+                        ['text' => '🔗 Visit Website', 'url' => config('app.url')],
+                    ],
+                ],
+            ];
+
+            $response = $this->http->post($url, [
+                'json' => [
+                    'chat_id' => $request->chat_id,
+                    'text' => $request->message,
+                    'parse_mode' => 'Markdown',
+                    'reply_markup' => json_encode($keyboard),
+                ],
+            ]);
+
+            $result = json_decode($response->getBody(), true);
+
+            if ($result['ok']) {
+                TelegramMessageLog::logOutgoing($request->chat_id, $request->message);
+                return response()->json(['success' => true, 'message' => 'Message with keyboard sent!']);
+            }
+
+            throw new \Exception('Failed to send message');
+
+        } catch (\Exception $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    public function getBotInfo(): JsonResponse
     {
         try {
             $botToken = config('services.telegram-bot-api.token');
-            $url = "https://api.telegram.org/bot{$botToken}/getMe";
-            
-            $client = new \GuzzleHttp\Client();
-            $response = $client->get($url);
+            $response = $this->http->get("https://api.telegram.org/bot{$botToken}/getMe");
             $result = json_decode($response->getBody(), true);
-            
-            return response()->json([
-                'success' => true,
-                'bot_info' => $result['result']
-            ]);
-            
+
+            return response()->json(['success' => true, 'bot_info' => $result['result']]);
+
         } catch (\Exception $e) {
             return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
         }
     }
 
-    // Get updates (messages from users)
-    public function getUpdates(Request $request)
+    public function getUpdates(Request $request): JsonResponse
     {
         try {
             $offset = $request->get('offset', 0);
             $botToken = config('services.telegram-bot-api.token');
-            $url = "https://api.telegram.org/bot{$botToken}/getUpdates?offset={$offset}";
-            
-            $client = new \GuzzleHttp\Client();
-            $response = $client->get($url);
+            $response = $this->http->get("https://api.telegram.org/bot{$botToken}/getUpdates?offset={$offset}&limit=20");
             $result = json_decode($response->getBody(), true);
-            
-            return response()->json([
-                'success' => true,
-                'updates' => $result['result']
-            ]);
-            
+
+            return response()->json(['success' => true, 'updates' => $result['result']]);
+
         } catch (\Exception $e) {
             return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
         }
     }
 
-    // Send inline keyboard
-    public function sendWithInlineKeyboard(Request $request)
+    public function setWebhook(Request $request): JsonResponse
     {
         try {
-            $request->validate([
-                'chat_id' => 'required',
-                'message' => 'required'
-            ]);
-            
+            $request->validate(['url' => 'required|url']);
+
             $botToken = config('services.telegram-bot-api.token');
-            $url = "https://api.telegram.org/bot{$botToken}/sendMessage";
-            
-            $keyboard = [
-                'inline_keyboard' => [
-                    [
-                        ['text' => '👍 Yes', 'callback_data' => 'yes'],
-                        ['text' => '👎 No', 'callback_data' => 'no']
-                    ],
-                    [
-                        ['text' => '🔗 Visit Website', 'url' => 'https://laravel.com']
-                    ]
-                ]
-            ];
-            
-            $client = new \GuzzleHttp\Client();
-            $response = $client->post($url, [
+            $response = $this->http->post("https://api.telegram.org/bot{$botToken}/setWebhook", [
                 'json' => [
-                    'chat_id' => $request->chat_id,
-                    'text' => $request->message,
-                    'reply_markup' => json_encode($keyboard)
-                ]
+                    'url' => $request->url,
+                    'allowed_updates' => ['message', 'callback_query', 'my_chat_member'],
+                ],
             ]);
-            
+
             $result = json_decode($response->getBody(), true);
-            
-            if ($result['ok']) {
-                return response()->json(['success' => true, 'message' => 'Message with keyboard sent!']);
-            } else {
-                throw new \Exception('Failed to send message');
-            }
-            
+
+            return response()->json(['success' => $result['ok'], 'message' => $result['description']]);
+
         } catch (\Exception $e) {
             return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
         }
     }
 
-    // Show dashboard
-public function dashboard()
-{
-    return view('telegram.dashboard');
-}
+    public function getAnalytics(): JsonResponse
+    {
+        try {
+            $analytics = [
+                'total_sent' => TelegramMessageLog::outgoing()->count(),
+                'sent_today' => TelegramMessageLog::outgoing()->today()->count(),
+                'total_received' => TelegramMessageLog::incoming()->count(),
+                'received_today' => TelegramMessageLog::incoming()->today()->count(),
+                'failed' => TelegramMessageLog::failed()->count(),
+                'scheduled' => TelegramMessageLog::where('status', 'scheduled')->count(),
+                'total_subscribers' => TelegramSubscription::active()->count(),
+                'private_subscribers' => TelegramSubscription::active()->private()->count(),
+                'group_subscribers' => TelegramSubscription::active()->groups()->count(),
+                'channel_subscribers' => TelegramSubscription::active()->channels()->count(),
+            ];
+
+            return response()->json(['success' => true, 'analytics' => $analytics]);
+
+        } catch (\Exception $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    public function getSubscribers(Request $request): JsonResponse
+    {
+        try {
+            $subscribers = TelegramSubscription::active()
+                ->latest()
+                ->paginate(20);
+
+            return response()->json(['success' => true, 'subscribers' => $subscribers]);
+
+        } catch (\Exception $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
+        }
+    }
 }

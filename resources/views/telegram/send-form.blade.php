@@ -198,6 +198,7 @@
         <div id="alert" class="alert"></div>
         
         <form id="telegramForm">
+            @csrf
             <input type="hidden" name="_token" value="{{ csrf_token() }}">
             
             <div class="form-group">

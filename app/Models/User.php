@@ -11,11 +11,19 @@ class User extends Authenticatable
 
     protected $telegramChatId = null;
 
+   
     public function routeNotificationForTelegram()
     {
-        return $this->telegramChatId ?? "987654321"; // Default chat ID
+        return $this->telegramChatId;
     }
 
+   
+    public function getTelegramChatId()
+    {
+        return $this->telegramChatId;
+    }
+
+  
     public function setTelegramChatId($chatId)
     {
         $this->telegramChatId = $chatId;
